@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>캐시 정합성 연습장</title>
+<style>
+  :root { --line:#d8dce3; --muted:#667085; --ok:#137333; --bad:#c5221f; --bg:#f7f8fa; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,"Malgun Gothic",sans-serif; font-size:14px; color:#1f2328; background:var(--bg); }
+  header { padding:14px 20px; background:#fff; border-bottom:1px solid var(--line); }
+  header h1 { margin:0; font-size:18px; }
+  header p { margin:4px 0 0; color:var(--muted); }
+  main { display:grid; grid-template-columns:380px 1fr; gap:16px; padding:16px 20px; }
+  .panel { background:#fff; border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  h2 { font-size:15px; margin:14px 0 6px; }
+  h2:first-child { margin-top:0; }
+  .sc { border-top:1px solid var(--line); padding:8px 0; }
+  .sc b { display:block; }
+  .sc span { color:var(--muted); font-size:13px; display:block; margin:2px 0 6px; }
+  button { font:inherit; padding:4px 10px; border:1px solid #b6bcc6; border-radius:5px; background:#fff; cursor:pointer; }
+  button:hover { background:#eef1f5; }
+  button.primary { background:#1f6feb; color:#fff; border-color:#1f6feb; }
+  .verdict { padding:10px 12px; border-radius:6px; margin-bottom:12px; display:none; }
+  .verdict.ok { display:block; background:#e6f4ea; color:var(--ok); }
+  .verdict.bad { display:block; background:#fce8e6; color:var(--bad); }
+  table { border-collapse:collapse; width:100%; }
+  td { border-bottom:1px solid var(--line); padding:5px 6px; vertical-align:top; }
+  td:first-child { color:var(--muted); width:300px; white-space:nowrap; }
+  pre { background:#0d1117; color:#e6edf3; padding:12px; border-radius:6px; overflow:auto; max-height:520px; font-size:12.5px; line-height:1.5; margin:0; }
+  .manual { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:6px 0; }
+  .manual input { font:inherit; padding:4px 6px; width:220px; }
+  .row { display:flex; gap:8px; align-items:center; justify-content:space-between; }
+  @media (max-width: 900px) { main { grid-template-columns:1fr; } td:first-child { white-space:normal; width:auto; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>캐시 정합성 연습장 (redis-lab)</h1>
+  <p>lesson 1번(학습 데이터 한 건)을 두고, 캐시와 DB가 어긋나는 경우와 막는 방법을 재현합니다. 시나리오마다 처음 상태로 되돌린 뒤 실행합니다.</p>
+</header>
+<main>
+  <section class="panel" id="list"></section>
+  <section>
+    <div id="verdict" class="verdict"></div>
+    <div class="panel">
+      <div class="row"><h2>현재 상태 (lesson 1)</h2>
+        <span><label><input type="checkbox" id="auto" checked> 1초마다 새로고침</label> <button onclick="reset()">처음부터</button></span></div>
+      <table id="state"></table>
+    </div>
+    <div class="panel" style="margin-top:12px">
+      <h2>직접 눌러 보기</h2>
+      <div class="manual">읽기:
+        <button onclick="rd('no-cache')">캐시 없이</button>
+        <button onclick="rd('cache-aside')">Cache-Aside</button>
+        <button onclick="rd('replica')">복제본에서 채우기</button>
+        <button onclick="rd('cacheable')">@Cacheable</button>
+        <button onclick="rd('server-a')">서버A 로컬</button>
+        <button onclick="rd('server-b')">서버B 로컬</button>
+      </div>
+      <div class="manual">쓰기: <input id="title" value="1단원 일차방정식 (개정)">
+        <button onclick="wr('db-only')">DB만</button>
+        <button onclick="wr('evict-after-commit')">커밋 뒤 삭제</button>
+        <button onclick="wr('evict-before-commit')">커밋 전 삭제</button>
+        <button onclick="wr('write-through')">덮어쓰기</button>
+        <button onclick="wr('evict-twice')">지연 이중 삭제</button>
+        <button onclick="wr('server-a')">서버A(알림 없음)</button>
+        <button onclick="wr('server-a-pubsub')">서버A(Pub/Sub)</button>
+        <button onclick="wr('cache-evict-in-tx')">@Transactional 안 @CacheEvict</button>
+      </div>
+    </div>
+    <div class="panel" style="margin-top:12px">
+      <h2>타임라인</h2>
+      <pre id="timeline"></pre>
+    </div>
+  </section>
+</main>
+<script>
+let busy = false;
+
+async function api(method, url) {
+  const res = await fetch(url, { method });
+  const body = await res.json();
+  if (!res.ok) { alert(body.error || '오류'); throw new Error(body.error); }
+  return body;
+}
+
+function render(view) {
+  const rows = Object.entries(view.state).map(([k, v]) => `<tr><td>${k}</td><td>${esc(String(v))}</td></tr>`);
+  document.getElementById('state').innerHTML = rows.join('');
+  const pre = document.getElementById('timeline');
+  pre.textContent = view.timeline.join('\n');
+}
+
+function esc(s) { return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+async function loadList() {
+  const list = await api('GET', '/api/scenarios');
+  let html = '', group = '';
+  for (const s of list) {
+    if (s.group !== group) { group = s.group; html += `<h2>${group}</h2>`; }
+    html += `<div class="sc"><b>${s.title}</b><span>${s.question}</span>
+      <button class="primary" onclick="run('${s.id}')">재현</button></div>`;
+  }
+  document.getElementById('list').innerHTML = html;
+}
+
+async function run(id) {
+  busy = true;
+  const v = document.getElementById('verdict');
+  v.className = 'verdict ok'; v.textContent = '실행 중...';
+  try {
+    const r = await api('POST', '/api/scenarios/' + id);
+    v.className = 'verdict ' + (r.consistent ? 'ok' : 'bad');
+    v.textContent = (r.consistent ? '[맞음] ' : '[어긋남] ') + r.verdict;
+    render(r);
+  } finally { busy = false; }
+}
+
+async function reset() { document.getElementById('verdict').className = 'verdict'; render(await api('POST', '/api/reset')); }
+async function rd(how) { render(await api('POST', '/api/read?how=' + how)); }
+async function wr(how) {
+  const t = encodeURIComponent(document.getElementById('title').value);
+  render(await api('POST', `/api/write?how=${how}&title=${t}`));
+}
+
+setInterval(async () => {
+  if (busy || !document.getElementById('auto').checked) return;
+  render(await api('GET', '/api/state'));
+}, 1000);
+
+loadList().then(() => api('GET', '/api/state').then(render));
+</script>
+</body>
+</html>

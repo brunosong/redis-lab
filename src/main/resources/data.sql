@@ -1,0 +1,5 @@
+INSERT INTO lesson VALUES (1, '1단원 일차방정식', 1, CURRENT_TIMESTAMP);
+INSERT INTO lesson VALUES (2, '2단원 연립방정식', 1, CURRENT_TIMESTAMP);
+INSERT INTO lesson VALUES (3, '3단원 일차함수', 1, CURRENT_TIMESTAMP);
+
+INSERT INTO lesson_replica SELECT * FROM lesson;

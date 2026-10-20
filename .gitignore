@@ -1,0 +1,11 @@
+# 빌드 결과
+target/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
